@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Business {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users    User[]
+  clients  Client[]
+  invoices Invoice[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  businessId   String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+
+  @@index([businessId])
+}
+
+model Client {
+  id         String   @id @default(cuid())
+  name       String
+  address    String   @default("")
+  gstin      String?
+  phone      String?
+  email      String?
+  businessId String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+
+  @@index([businessId, name])
+}
+
+model Invoice {
+  id               String    @id @default(cuid())
+  invoiceNo        String
+  invoiceDate      DateTime
+  dueDate          DateTime?
+  clientName       String
+  clientAddress    String
+  clientGstin      String?
+  clientPhone      String?
+  clientEmail      String?
+  placeOfSupply    String
+  taxMode          String
+  subtotal         Decimal   @db.Decimal(14, 2)
+  tax              Decimal   @db.Decimal(14, 2)
+  discount         Decimal   @default(0) @db.Decimal(14, 2)
+  total            Decimal   @db.Decimal(14, 2)
+  amountPaid       Decimal   @default(0) @db.Decimal(14, 2)
+  paymentStatus    String    @default("UNPAID")
+  workStatus       String    @default("PENDING")
+  workProgress     Int       @default(0)
+  notes            String?
+  driveFileId      String?
+  driveWebViewLink String?
+  pdfPath          String?
+  items            Json
+  businessId       String
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Restrict)
+
+  @@unique([businessId, invoiceNo])
+  @@index([businessId, invoiceDate])
+  @@index([businessId, createdAt])
+}
