@@ -13,7 +13,15 @@ import { chromium } from 'playwright';
 
 const app = express();
 const prisma = new PrismaClient();
-app.use(cors({ origin: ['http://localhost:5173'], credentials: false }));
+
+app.use(cors({
+  origin: [
+    'http://localhost:5173',
+    'https://client-cyan-nu-42.vercel.app'
+  ],
+  credentials: false
+}));
+
 app.use(express.json({ limit: '5mb' }));
 const PORT = Number(process.env.PORT || 4000);
 const tokenPath = path.resolve(process.env.GOOGLE_TOKEN_PATH || './google-tokens.json');
