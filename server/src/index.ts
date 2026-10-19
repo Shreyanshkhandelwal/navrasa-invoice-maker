@@ -24,7 +24,6 @@ app.use(cors({
 
 app.use(express.json({ limit: '5mb' }));
 const PORT = Number(process.env.PORT || 4000);
-const tokenPath = path.resolve(process.env.GOOGLE_TOKEN_PATH || './google-tokens.json');
 const generatedDir = path.resolve('./generated-invoices');
 fs.mkdirSync(generatedDir, { recursive: true });
 
@@ -316,6 +315,30 @@ app.get('/api/invoices', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Invoice list failed:', error);
     return res.status(500).json({ error: 'Could not load invoices.' });
+  }
+});
+
+app.delete('/api/invoices/:id', requireAuth, async (req, res) => {
+  try {
+    const businessId = (req as AuthenticatedRequest).auth!.businessId;
+    const invoiceId = String(req.params.id);
+
+    const existing = await prisma.invoice.findFirst({
+      where: { id: invoiceId, businessId },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Invoice not found.' });
+    }
+
+    await prisma.invoice.delete({
+      where: { id: existing.id },
+    });
+
+    return res.status(204).end();
+  } catch (error) {
+    console.error('Invoice deletion failed:', error);
+    return res.status(500).json({ error: 'Could not delete invoice.' });
   }
 });
 
@@ -655,17 +678,47 @@ app.delete('/api/clients/:id', requireAuth, async (req, res) => {
 });
 
 
+
 function getOAuthClient() {
-  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI } = process.env;
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REDIRECT_URI) return null;
-  return new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI);
+  const {
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI,
+  } = process.env;
+
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REDIRECT_URI) {
+    return null;
+  }
+
+  return new google.auth.OAuth2(
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI
+  );
 }
-async function driveClient() {
+
+async function driveClient(businessId: string) {
   const oauth = getOAuthClient();
-  if (!oauth || !fs.existsSync(tokenPath)) return null;
-  oauth.setCredentials(JSON.parse(fs.readFileSync(tokenPath, 'utf8')));
-  return google.drive({ version: 'v3', auth: oauth });
+  if (!oauth) return null;
+
+  const connection = await prisma.googleDriveConnection.findUnique({
+    where: { businessId },
+  });
+
+  if (!connection?.refreshToken) return null;
+
+  oauth.setCredentials({
+    refresh_token: connection.refreshToken,
+    access_token: connection.accessToken || undefined,
+    expiry_date: connection.tokenExpiry?.getTime(),
+  });
+
+  return google.drive({
+    version: 'v3',
+    auth: oauth,
+  });
 }
+
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 const money = (n: number) => new Intl.NumberFormat('en-IN', { style:'currency', currency:'INR', maximumFractionDigits:2 }).format(n);
 function invoiceHtml(d: any) {
@@ -752,28 +805,42 @@ app.post('/api/invoices/pdf', requireAuth, async (req, res) => {
 
     // Google Drive currently uses one local development OAuth token. Keep it disabled
     // for multi-tenant use until credentials are stored separately per business.
+    
+    // Upload the invoice to this business's connected Google Drive.
     try {
-      if (process.env.ENABLE_SHARED_GOOGLE_DRIVE_FOR_LOCAL_DEV === 'true') {
-        const drive = await driveClient();
-        if (drive) {
-          const uploaded = await drive.files.create({
-            requestBody: {
-              name: filename,
-              mimeType: 'application/pdf',
-              parents: process.env.GOOGLE_DRIVE_FOLDER_ID ? [process.env.GOOGLE_DRIVE_FOLDER_ID] : undefined,
-            },
-            media: { mimeType: 'application/pdf', body: fs.createReadStream(filePath) },
-            fields: 'id,name,webViewLink',
-          });
-          await prisma.invoice.update({
-            where: { id: record.id },
-            data: { driveFileId: uploaded.data.id || null, driveWebViewLink: uploaded.data.webViewLink || null },
-          });
-        }
+      const drive = await driveClient(businessId);
+
+      if (drive) {
+        const uploaded = await drive.files.create({
+          requestBody: {
+            name: filename,
+            mimeType: 'application/pdf',
+            parents: process.env.GOOGLE_DRIVE_FOLDER_ID
+              ? [process.env.GOOGLE_DRIVE_FOLDER_ID]
+              : undefined,
+          },
+          media: {
+            mimeType: 'application/pdf',
+            body: fs.createReadStream(filePath),
+          },
+          fields: 'id,name,webViewLink',
+        });
+
+        await prisma.invoice.update({
+          where: { id: record.id },
+          data: {
+            driveFileId: uploaded.data.id || null,
+            driveWebViewLink: uploaded.data.webViewLink || null,
+          },
+        });
       }
     } catch (error) {
-      console.error('Google Drive upload failed; invoice remains saved locally:', error);
+      console.error(
+        'Google Drive upload failed; invoice remains saved locally:',
+        error
+      );
     }
+
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -784,15 +851,384 @@ app.post('/api/invoices/pdf', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'PDF generation failed. Check server logs and Playwright browser installation.' });
   }
 });
-app.get('/api/google/connect', requireAuth, (req,res) => {
- const oauth=getOAuthClient(); if(!oauth)return res.status(503).send('Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI in server/.env first.');
- const url=oauth.generateAuthUrl({access_type:'offline',prompt:'consent',scope:['https://www.googleapis.com/auth/drive.file']});
- res.redirect(url);
+
+app.get('/api/google/connect', requireAuth, (req, res) => {
+  const oauth = getOAuthClient();
+  const jwtSecret = process.env.JWT_SECRET;
+  const auth = (req as AuthenticatedRequest).auth;
+
+  if (!oauth) {
+    return res.status(503).json({
+      error: 'Google OAuth is not configured. Check server/.env.',
+    });
+  }
+
+  if (!jwtSecret || jwtSecret.length < 32 || !auth) {
+    return res.status(500).json({
+      error: 'Authentication is not configured.',
+    });
+  }
+
+  const state = jwt.sign(
+    {
+      purpose: 'google-drive-connect',
+      userId: auth.userId,
+      businessId: auth.businessId,
+    },
+    jwtSecret,
+    {
+      algorithm: 'HS256',
+      expiresIn: '10m',
+    }
+  );
+
+  const url = oauth.generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent select_account',
+    scope: [
+      'https://www.googleapis.com/auth/drive.file',
+      'https://www.googleapis.com/auth/userinfo.email',
+    ],
+    state,
+  });
+
+  return res.json({ url });
 });
-app.get('/api/google/callback',async(req,res)=>{
- const oauth=getOAuthClient(); if(!oauth)return res.status(503).send('Google OAuth is not configured.');
- try { const code=String(req.query.code||'');const {tokens}=await oauth.getToken(code);fs.writeFileSync(tokenPath,JSON.stringify(tokens,null,2),{mode:0o600});res.send('Google Drive connected for local development. You can close this page and return to Invoice Studio.'); }
- catch(e){console.error(e);res.status(500).send('Google OAuth failed. Check server logs and OAuth redirect URI.');}
+
+app.get('/api/google/callback', async (req, res) => {
+  const oauth = getOAuthClient();
+  const jwtSecret = process.env.JWT_SECRET;
+  const frontendUrl =
+    process.env.FRONTEND_URL || 'https://client-cyan-nu-42.vercel.app';
+
+  const redirectWithResult = (result: Record<string, string>) => {
+    const url = new URL(frontendUrl);
+    for (const [key, value] of Object.entries(result)) {
+      url.searchParams.set(key, value);
+    }
+    return res.redirect(url.toString());
+  };
+
+  try {
+    const googleError = String(req.query.error || '');
+
+    if (googleError) {
+      return redirectWithResult({
+        googleError: 'Google authorization was cancelled or denied.',
+      });
+    }
+
+    if (!oauth || !jwtSecret || jwtSecret.length < 32) {
+      return redirectWithResult({
+        googleError: 'Google Drive connection is not configured.',
+      });
+    }
+
+    const code = String(req.query.code || '');
+    const state = String(req.query.state || '');
+
+    if (!code || !state) {
+      return redirectWithResult({
+        googleError: 'Google authorization code or state is missing.',
+      });
+    }
+
+    const payload = jwt.verify(state, jwtSecret, {
+      algorithms: ['HS256'],
+    });
+
+    if (
+      typeof payload === 'string' ||
+      payload.purpose !== 'google-drive-connect' ||
+      typeof payload.userId !== 'string' ||
+      typeof payload.businessId !== 'string'
+    ) {
+      return redirectWithResult({
+        googleError: 'Invalid Google authorization state.',
+      });
+    }
+
+    const user = await prisma.user.findFirst({
+      where: {
+        id: payload.userId,
+        businessId: payload.businessId,
+      },
+      select: {
+        id: true,
+        businessId: true,
+      },
+    });
+
+    if (!user) {
+      return redirectWithResult({
+        googleError: 'The account associated with this connection was not found.',
+      });
+    }
+
+    const { tokens } = await oauth.getToken(code);
+
+    oauth.setCredentials(tokens);
+
+    const googleAccount = await google.oauth2({
+      version: 'v2',
+      auth: oauth,
+    }).userinfo.get();
+
+    const googleEmail = googleAccount.data.email;
+
+    if (!googleEmail) {
+      return redirectWithResult({
+        googleError: 'Google did not return an account email.',
+      });
+    }
+
+    const existing = await prisma.googleDriveConnection.findUnique({
+      where: { businessId: user.businessId },
+    });
+
+    const sameGoogleAccount =
+    existing?.googleEmail?.toLowerCase() === googleEmail.toLowerCase();
+    
+    const refreshToken =
+    tokens.refresh_token ||
+    (sameGoogleAccount ? existing?.refreshToken : null);
+
+
+    if (!refreshToken) {
+      return redirectWithResult({
+        googleError:
+          'Google did not provide a refresh token. Disconnect the app from your Google Account permissions and try connecting again.',
+      });
+    }
+
+    await prisma.googleDriveConnection.upsert({
+      where: { businessId: user.businessId },
+      update: {
+        googleEmail,
+        refreshToken,
+        accessToken: tokens.access_token || existing?.accessToken || null,
+        tokenExpiry: tokens.expiry_date
+          ? new Date(tokens.expiry_date)
+          : existing?.tokenExpiry || null,
+      },
+      create: {
+        businessId: user.businessId,
+        googleEmail,
+        refreshToken,
+        accessToken: tokens.access_token || null,
+        tokenExpiry: tokens.expiry_date
+          ? new Date(tokens.expiry_date)
+          : null,
+      },
+    });
+
+    return redirectWithResult({ googleConnected: 'true' });
+  } catch (error) {
+    console.error(
+      'Google OAuth callback failed:',
+      error instanceof Error ? error.message : error
+    );
+
+    return redirectWithResult({
+      googleError: 'Google Drive connection failed. Please try again.',
+    });
+  }
 });
+
+app.get('/api/google/status', requireAuth, async (req, res) => {
+  try {
+    const businessId = (req as AuthenticatedRequest).auth!.businessId;
+
+    const connection = await prisma.googleDriveConnection.findUnique({
+      where: { businessId },
+      select: {
+        googleEmail: true,
+        connectedAt: true,
+      },
+    });
+
+    return res.json({
+      connected: Boolean(connection),
+      email: connection?.googleEmail || null,
+      connectedAt: connection?.connectedAt || null,
+    });
+  } catch (error) {
+    console.error('Google Drive status check failed:', error);
+
+    return res.status(500).json({
+      error: 'Could not check Google Drive connection.',
+    });
+  }
+});
+
+app.delete('/api/google/disconnect', requireAuth, async (req, res) => {
+  try {
+    const businessId = (req as AuthenticatedRequest).auth!.businessId;
+
+    await prisma.googleDriveConnection.deleteMany({
+      where: { businessId },
+    });
+
+    return res.json({ disconnected: true });
+  } catch (error) {
+    console.error('Google Drive disconnect failed:', error);
+
+    return res.status(500).json({
+      error: 'Could not disconnect Google Drive.',
+    });
+  }
+});
+
+
+const companyProfileSelect = {
+  id: true,
+  name: true,
+  logoDataUrl: true,
+  legalName: true,
+  address: true,
+  phone: true,
+  email: true,
+  gstin: true,
+  pan: true,
+  bankAccountName: true,
+  bankAccountNumber: true,
+  ifsc: true,
+  accountType: true,
+  bankName: true,
+  upiId: true,
+  paymentTerms: true,
+  invoiceFooter: true,
+};
+
+const companyProfileFields = [
+  'name',
+  'logoDataUrl',
+  'legalName',
+  'address',
+  'phone',
+  'email',
+  'gstin',
+  'pan',
+  'bankAccountName',
+  'bankAccountNumber',
+  'ifsc',
+  'accountType',
+  'bankName',
+  'upiId',
+  'paymentTerms',
+  'invoiceFooter',
+] as const;
+
+type CompanyProfileField = (typeof companyProfileFields)[number];
+
+const companyProfileTextFields: CompanyProfileField[] = [
+  ...companyProfileFields,
+];
+
+app.get('/api/company-profile', requireAuth, async (req, res) => {
+  try {
+    const businessId = (req as AuthenticatedRequest).auth!.businessId;
+
+    const business = await prisma.business.findUnique({
+      where: { id: businessId },
+      select: companyProfileSelect,
+    });
+
+    if (!business) {
+      return res.status(404).json({ error: 'Company profile not found.' });
+    }
+
+    return res.json({ profile: business });
+  } catch (error) {
+    console.error('Company profile fetch failed:', error);
+    return res.status(500).json({
+      error: 'Could not load company profile.',
+    });
+  }
+});
+
+app.put('/api/company-profile', requireAuth, async (req, res) => {
+  try {
+    const businessId = (req as AuthenticatedRequest).auth!.businessId;
+    const body = req.body;
+
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ error: 'Invalid profile data.' });
+    }
+
+    const data: Record<string, string | null> = {};
+
+    for (const field of companyProfileTextFields) {
+      if (!(field in body)) continue;
+
+      const value = body[field];
+
+      if (value !== null && typeof value !== 'string') {
+        return res.status(400).json({
+          error: `${field} must be text.`,
+        });
+      }
+
+      const normalized = typeof value === 'string' ? value.trim() : null;
+
+      if (field === 'name' && !normalized) {
+        return res.status(400).json({
+          error: 'Company name is required.',
+        });
+      }
+
+      const maxLength =
+        field === 'logoDataUrl' ? 4_000_000 :
+        field === 'address' || field === 'paymentTerms' ||
+        field === 'invoiceFooter' ? 5_000 :
+        field === 'name' || field === 'legalName' ? 150 :
+        field === 'email' ? 254 :
+        100;
+
+      if (normalized && normalized.length > maxLength) {
+        return res.status(400).json({
+          error: `${field} exceeds the maximum allowed length.`,
+        });
+      }
+
+      if (field === 'logoDataUrl' && normalized &&
+          !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=\r\n]+$/.test(normalized)) {
+        return res.status(400).json({
+          error: 'Logo must be a PNG, JPEG, or WebP image encoded as a data URL.',
+        });
+      }
+
+      if (field === 'email' && normalized &&
+          !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+        return res.status(400).json({
+          error: 'Please provide a valid company email address.',
+        });
+      }
+
+      data[field] = normalized;
+    }
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({
+        error: 'No company profile fields were provided.',
+      });
+    }
+
+    const business = await prisma.business.update({
+      where: { id: businessId },
+      data,
+      select: companyProfileSelect,
+    });
+
+    return res.json({ profile: business });
+  } catch (error) {
+    console.error('Company profile update failed:', error);
+
+    return res.status(500).json({
+      error: 'Could not update company profile.',
+    });
+  }
+});
+
 app.listen(PORT,()=>console.log(`NavRasa Invoice API listening on http://localhost:${PORT}`));
 process.on('SIGINT',async()=>{await prisma.$disconnect();process.exit(0);});

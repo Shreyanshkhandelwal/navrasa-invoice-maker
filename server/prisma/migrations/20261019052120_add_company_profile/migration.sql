@@ -1,0 +1,16 @@
+-- AlterTable
+ALTER TABLE "Business" ADD COLUMN     "accountType" TEXT,
+ADD COLUMN     "address" TEXT,
+ADD COLUMN     "bankAccountName" TEXT,
+ADD COLUMN     "bankAccountNumber" TEXT,
+ADD COLUMN     "bankName" TEXT,
+ADD COLUMN     "email" TEXT,
+ADD COLUMN     "gstin" TEXT,
+ADD COLUMN     "ifsc" TEXT,
+ADD COLUMN     "invoiceFooter" TEXT,
+ADD COLUMN     "legalName" TEXT,
+ADD COLUMN     "logoDataUrl" TEXT,
+ADD COLUMN     "pan" TEXT,
+ADD COLUMN     "paymentTerms" TEXT,
+ADD COLUMN     "phone" TEXT,
+ADD COLUMN     "upiId" TEXT;

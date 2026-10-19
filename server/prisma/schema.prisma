@@ -13,9 +13,31 @@ model Business {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users    User[]
-  clients  Client[]
-  invoices Invoice[]
+  // Company profile
+  logoDataUrl String? @db.Text
+  legalName   String?
+  address     String? @db.Text
+  phone       String?
+  email       String?
+  gstin       String?
+  pan         String?
+
+  // Bank and payment details
+  bankAccountName   String?
+  bankAccountNumber String?
+  ifsc              String?
+  accountType       String?
+  bankName          String?
+  upiId             String?
+
+  // Invoice defaults
+  paymentTerms  String? @db.Text
+  invoiceFooter String? @db.Text
+
+  users                 User[]
+  clients               Client[]
+  invoices              Invoice[]
+  googleDriveConnection GoogleDriveConnection?
 }
 
 model User {
@@ -81,4 +103,19 @@ model Invoice {
   @@unique([businessId, invoiceNo])
   @@index([businessId, invoiceDate])
   @@index([businessId, createdAt])
+}
+
+model GoogleDriveConnection {
+  id           String    @id @default(cuid())
+  businessId   String    @unique
+  googleEmail  String?
+  refreshToken String?
+  accessToken  String?
+  tokenExpiry  DateTime?
+  connectedAt  DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId])
 }

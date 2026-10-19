@@ -81,3 +81,23 @@
   object-fit: contain;
   flex-shrink: 0;
 }
+
+
+/* Google Drive connection status */
+.connected {
+  position: absolute;
+  right: 15px;
+  top: 16px;
+  font-size: 9px;
+  font-weight: 600;
+  color: #249b70;
+}
+
+
+/* Login screen supporting text */
+.auth-footer {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted, #68736d);
+  margin: 16px 0 0;
+}
