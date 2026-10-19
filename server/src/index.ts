@@ -14,13 +14,17 @@ import { chromium } from 'playwright';
 const app = express();
 const prisma = new PrismaClient();
 
+
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://invoice.navrasaitsolutions.com',
+];
+
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'https://client-cyan-nu-42.vercel.app'
-  ],
-  credentials: false
+  origin: allowedOrigins,
+  credentials: false,
 }));
+
 
 app.use(express.json({ limit: '5mb' }));
 const PORT = Number(process.env.PORT || 4000);
