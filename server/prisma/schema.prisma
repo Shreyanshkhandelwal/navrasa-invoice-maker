@@ -87,6 +87,8 @@ model Invoice {
   total            Decimal   @db.Decimal(14, 2)
   amountPaid       Decimal   @default(0) @db.Decimal(14, 2)
   paymentStatus    String    @default("UNPAID")
+  invoiceStatus    String    @default("COMPLETED")
+  invoiceType      String    @default("INVOICE")
   workStatus       String    @default("PENDING")
   workProgress     Int       @default(0)
   notes            String?
@@ -103,6 +105,7 @@ model Invoice {
   @@unique([businessId, invoiceNo])
   @@index([businessId, invoiceDate])
   @@index([businessId, createdAt])
+  @@index([businessId, invoiceStatus, invoiceType, invoiceDate])
 }
 
 model GoogleDriveConnection {

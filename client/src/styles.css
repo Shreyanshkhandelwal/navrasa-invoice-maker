@@ -101,3 +101,10 @@
   color: var(--muted, #68736d);
   margin: 16px 0 0;
 }
+
+
+/* Invoice / proforma list switcher */
+.invoice-view-tabs{display:flex;gap:8px;margin:-8px 0 18px;border-bottom:1px solid #e7e9ed;padding-bottom:10px}
+.invoice-view-tabs button{display:flex;align-items:center;gap:9px;border:1px solid transparent;background:transparent;border-radius:8px;padding:10px 14px;color:#687180;font-size:12px;font-weight:700}
+.invoice-view-tabs button.active{background:#fff;border-color:#e3e6eb;color:#171b23;box-shadow:0 1px 2px #1111}
+.invoice-view-tabs button span{background:#f0f2f5;border-radius:5px;padding:2px 6px;font-size:10px}

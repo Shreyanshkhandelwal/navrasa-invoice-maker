@@ -21,6 +21,8 @@ type Invoice = {
   total: number;
   amountPaid: number;
   paymentStatus: string;
+  invoiceStatus?: 'DRAFT' | 'COMPLETED';
+  invoiceType?: 'INVOICE' | 'PROFORMA';
   workStatus?: string;
   workProgress?: number;
   status: string;
@@ -51,12 +53,12 @@ type CompanyProfile = {
 
 const blankCompanyProfile: CompanyProfile = {
   id: '',
-  name: '',
+  name: 'NavRasa IT Solutions',
   logoDataUrl: null,
-  legalName: '',
-  address: '',
-  phone: '',
-  email: '',
+  legalName: 'NavRasa IT Solutions',
+  address: 'Gurjar Ki Thadi Ka Chauraha',
+  phone: '7689985615',
+  email: 'shreyansh@navrasaitsolutions.com',
   gstin: '',
   pan: '',
   bankAccountName: '',
@@ -132,6 +134,9 @@ export default function App(){
  const [discount,setDiscount]=useState(0);
  const [amountPaid,setAmountPaid]=useState(0);
  const [editingInvoiceId,setEditingInvoiceId]=useState<string|null>(null);
+ const [editingInvoiceStatus,setEditingInvoiceStatus]=useState<'DRAFT'|'COMPLETED'|null>(null);
+ const [invoiceType,setInvoiceType]=useState<'INVOICE'|'PROFORMA'>('INVOICE');
+ const [invoiceView,setInvoiceView]=useState<'INVOICE'|'PROFORMA'>('INVOICE');
  const [workStatus,setWorkStatus]=useState<'PENDING'|'PARTIAL'|'COMPLETED'>('PENDING');
  const [search,setSearch]=useState('');
  const [clientSearch,setClientSearch]=useState('');
@@ -178,9 +183,19 @@ export default function App(){
       '/api/company-profile'
     );
 
-    setCompanyProfile({
+    const profile = {
       ...blankCompanyProfile,
       ...result.profile,
+    };
+
+    // Apply defaults only when a saved field is empty.
+    setCompanyProfile({
+      ...profile,
+      name: profile.name?.trim() || blankCompanyProfile.name,
+      legalName: profile.legalName?.trim() || blankCompanyProfile.legalName,
+      address: profile.address?.trim() || blankCompanyProfile.address,
+      phone: profile.phone?.trim() || blankCompanyProfile.phone,
+      email: profile.email?.trim() || blankCompanyProfile.email,
     });
     setProfileLoaded(true);
   } catch (e) {
@@ -265,7 +280,7 @@ async function saveCompanyProfile() {
   reader.onerror = () => notify('Could not read the selected logo.');
   reader.readAsDataURL(file);
 }
- const refreshAll=useCallback(async()=>{if(!localStorage.getItem(AUTH_TOKEN_KEY))return;setLoading(true);setError('');await Promise.all([loadDashboard(),loadInvoices(),loadClients()]);setLoading(false);},[loadDashboard,loadInvoices,loadClients]);
+ const refreshAll=useCallback(async()=>{if(!localStorage.getItem(AUTH_TOKEN_KEY))return;setLoading(true);setError('');try{await Promise.all([loadDashboard(),loadInvoices(),...(page==='clients'?[loadClients()]:[])]);}finally{setLoading(false);}},[loadDashboard,loadInvoices,loadClients,page]);
  
 const refreshGoogleDrive = useCallback(async () => {
   if (!localStorage.getItem(AUTH_TOKEN_KEY)) return;
@@ -291,7 +306,12 @@ const refreshGoogleDrive = useCallback(async () => {
   }
 }, []);
 
- useEffect(()=>{if(authToken)void refreshAll();},[authToken,refreshAll]);
+ useEffect(()=>{
+  if(!authToken)return;
+  setLoading(true);
+  setError('');
+  void loadDashboard().finally(()=>setLoading(false));
+ },[authToken,loadDashboard]);
  
 useEffect(() => {
   if (authToken) {
@@ -331,15 +351,23 @@ useEffect(() => {
  useEffect(()=>{const expire=()=>{setAuthToken(null);setAuthUser(null);setDashboard(null);setInvoices([]);setClients([]);};window.addEventListener('navrasa-auth-expired',expire);return()=>window.removeEventListener('navrasa-auth-expired',expire);},[]);
  async function submitAuth(e:React.FormEvent<HTMLFormElement>){e.preventDefault();setAuthBusy(true);setAuthError('');try{const result=await api<AuthResponse>(authMode==='register'?'/api/auth/register':'/api/auth/login',{method:'POST',body:JSON.stringify({email:authEmail,password:authPassword,...(authMode==='register'?{businessName:authBusinessName}:{})})});localStorage.setItem(AUTH_TOKEN_KEY,result.token);const savedUser={id:result.user.id,email:result.user.email,businessName:result.business.name};localStorage.setItem(AUTH_USER_KEY,JSON.stringify(savedUser));setAuthUser(savedUser);setAuthToken(result.token);setAuthPassword('');}catch(e){setAuthError(e instanceof Error?e.message:'Authentication failed.');}finally{setAuthBusy(false);}}
  function logout(){localStorage.removeItem(AUTH_TOKEN_KEY);localStorage.removeItem(AUTH_USER_KEY);setAuthToken(null);setAuthUser(null);setDashboard(null);setInvoices([]);setClients([]);setPage('dashboard');}
- useEffect(()=>{if(authToken&&page==='clients')void loadClients();},[authToken,page,loadClients]);
+ useEffect(()=>{
+  if(!authToken||page!=='clients')return;
+  const timeout=window.setTimeout(()=>void loadClients(),250);
+  return ()=>window.clearTimeout(timeout);
+ },[authToken,page,loadClients]);
  useEffect(() => {
   if (authToken && page === 'company-profile') {
     void loadCompanyProfile();
   }
 }, [authToken, page, loadCompanyProfile]);
- useEffect(()=>{if(authToken&&(page==='invoices'||page==='dashboard'))void loadInvoices();},[authToken,page,loadInvoices]);
+ useEffect(()=>{
+  if(!authToken)return;
+  const timeout=window.setTimeout(()=>void loadInvoices(),250);
+  return ()=>window.clearTimeout(timeout);
+ },[authToken,loadInvoices]);
  const updateItem=(id:number,key:keyof Item,value:string|number)=>setItems(old=>old.map(i=>i.id===id?{...i,[key]:value}:i));
- const newInvoice=()=>{setEditingInvoiceId(null);setWorkStatus('PENDING');setInvoiceNo('');setDate(today());setDueDate('');setPlace('');setTaxMode('IGST');setDiscount(0);setAmountPaid(0);setClient({...blankClient});setItems([blankItem()]);setPage('create');setError('');};
+ const newInvoice=()=>{setEditingInvoiceId(null);setEditingInvoiceStatus(null);setInvoiceType(invoiceView);setWorkStatus('PENDING');setInvoiceNo('');setDate(today());setDueDate('');setPlace('');setTaxMode('IGST');setDiscount(0);setAmountPaid(0);setClient({...blankClient});setItems([blankItem()]);setPage('create');setError('');};
  
  async function disconnectGoogleDrive() {
   const confirmed = window.confirm(
@@ -374,7 +402,7 @@ useEffect(() => {
 }
 
  function editInvoice(inv:Invoice){
-  setEditingInvoiceId(inv.id);setInvoiceNo(inv.invoiceNo);setDate(inv.invoiceDate?inv.invoiceDate.slice(0,10):today());setDueDate(inv.dueDate?inv.dueDate.slice(0,10):'');setPlace(inv.placeOfSupply||'');setTaxMode(inv.taxMode==='SPLIT'?'SPLIT':'IGST');setDiscount(Number(inv.discount)||0);setAmountPaid(Number(inv.amountPaid)||0);
+  setEditingInvoiceId(inv.id);setEditingInvoiceStatus(inv.invoiceStatus === 'DRAFT' ? 'DRAFT' : 'COMPLETED');setInvoiceType(inv.invoiceType === 'PROFORMA' ? 'PROFORMA' : 'INVOICE');setInvoiceNo(inv.invoiceNo);setDate(inv.invoiceDate?inv.invoiceDate.slice(0,10):today());setDueDate(inv.dueDate?inv.dueDate.slice(0,10):'');setPlace(inv.placeOfSupply||'');setTaxMode(inv.taxMode==='SPLIT'?'SPLIT':'IGST');setDiscount(Number(inv.discount)||0);setAmountPaid(Number(inv.amountPaid)||0);
   setWorkStatus(inv.workStatus==='COMPLETED'?'COMPLETED':inv.workStatus==='PARTIAL'?'PARTIAL':'PENDING');
   setClient({name:inv.clientName||'',address:inv.clientAddress||'',gstin:inv.clientGstin||'',phone:inv.clientPhone||'',email:inv.clientEmail||''});
   const savedItems=Array.isArray(inv.items)?inv.items:[];
@@ -382,18 +410,42 @@ useEffect(() => {
   setError('');setPage('create');
  }
  const chooseClient=(id:string)=>{const c=clients.find(x=>x.id===id);if(c)setClient({name:c.name,address:c.address||'',gstin:c.gstin||'',phone:c.phone||'',email:c.email||''});};
- const payload=()=>({invoiceNo:invoiceNo.trim(),date,dueDate,place,taxMode,discount,amountPaid,workStatus,client,items,subtotal,tax,total,amountWords:amountWords(total)});
- async function saveInvoice(){
-  if(!invoiceNo.trim()||!client.name.trim()||!items.length||items.some(i=>!i.description.trim()||!Number.isFinite(i.qty)||i.qty<=0||!Number.isFinite(i.rate)||i.rate<0)){notify('Enter an invoice number, client name and valid line items.');return;}
-  if(amountPaid<0||amountPaid>total){notify('Amount paid must be between ₹0 and the invoice total.');return;}
-  setLoading(true);setError('');try{const isEditing=Boolean(editingInvoiceId);await api<Invoice>(isEditing?`/api/invoices/${editingInvoiceId}`:'/api/invoices',{method:isEditing?'PUT':'POST',body:JSON.stringify(payload())});await refreshAll();notify(isEditing?'Invoice updated successfully.':'Invoice saved to PostgreSQL.');setEditingInvoiceId(null);setPage('invoices');}catch(e){notify(e instanceof Error?e.message:'Could not save invoice');}finally{setLoading(false);}
- }
- async function downloadInvoice(){
-  if(editingInvoiceId){notify('Save your invoice changes first, then generate the PDF.');return;}
-  if(!invoiceNo.trim()||!client.name.trim()||!items.length||items.some(i=>!i.description.trim()||i.qty<=0||i.rate<0)){notify('Enter a unique invoice number, client name and valid line items.');return;}
-  try{setLoading(true);const res=await fetch(`${API}/api/invoices/pdf`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${localStorage.getItem(AUTH_TOKEN_KEY)||''}`},body:JSON.stringify(payload())});if(!res.ok){let m='Could not generate PDF';try{m=(await res.json()).error||m;}catch{}throw new Error(m);}const blob=await res.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`${invoiceNo.replace(/[^a-zA-Z0-9_-]/g,'-')}.pdf`;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);await refreshAll();notify('PDF generated and invoice stored.');setPage('invoices');}catch(e){notify(e instanceof Error?e.message:'Could not generate PDF');}finally{setLoading(false);}
- }
- function updatePayment(inv:Invoice){setDialog({kind:'payment',invoice:inv,amountPaid:String(inv.amountPaid ?? 0),error:''});}
+ const payload=(invoiceStatus: 'DRAFT'|'COMPLETED' = editingInvoiceStatus || 'COMPLETED', fileName?: string)=>({invoiceNo:invoiceNo.trim(),date,dueDate,place,taxMode,discount,amountPaid,workStatus,client,items,subtotal,tax,total,amountWords:amountWords(total),invoiceStatus,invoiceType,...(fileName ? {fileName} : {})});
+ async function saveInvoice(invoiceStatus: 'DRAFT' | 'COMPLETED' = editingInvoiceStatus || 'COMPLETED'){
+   if(!invoiceNo.trim()||!client.name.trim()||!items.length||items.some(i=>!i.description.trim()||!Number.isFinite(i.qty)||i.qty<=0||!Number.isFinite(i.rate)||i.rate<0)){notify('Enter an invoice number, client name and valid line items.');return;}
+   if(amountPaid<0||amountPaid>total){notify('Amount paid must be between ₹0 and the invoice total.');return;}
+   setLoading(true);setError('');
+   try{
+    const isEditing=Boolean(editingInvoiceId);
+    const saved=await api<Invoice>(isEditing?`/api/invoices/${editingInvoiceId}`:'/api/invoices',{method:isEditing?'PUT':'POST',body:JSON.stringify(payload(invoiceStatus))});
+    await refreshAll();
+    setEditingInvoiceId(saved.id);
+    setEditingInvoiceStatus(saved.invoiceStatus === 'DRAFT' ? 'DRAFT' : 'COMPLETED');
+    notify(invoiceStatus==='DRAFT'?'Draft saved successfully.':isEditing?'Invoice updated successfully.':'Invoice saved to PostgreSQL.');
+    setPage('invoices');
+   }catch(e){notify(e instanceof Error?e.message:'Could not save invoice');}
+   finally{setLoading(false);}
+  }
+  async function downloadInvoice(){
+   if(!invoiceNo.trim()||!client.name.trim()||!items.length||items.some(i=>!i.description.trim()||!Number.isFinite(i.qty)||i.qty<=0||!Number.isFinite(i.rate)||i.rate<0)){notify('Enter an invoice number, client name and valid line items.');return;}
+   if(amountPaid<0||amountPaid>total){notify('Amount paid must be between ₹0 and the invoice total.');return;}
+   const baseInvoice = /^invoice/i.test(invoiceNo.trim()) ? invoiceNo.trim() : `Invoice${invoiceNo.trim()}`;
+   const defaultName = `${baseInvoice}_${client.name.trim()}`.replace(/[\\/:*?"<>|]/g,'-').replace(/\s+/g,'_');
+   const enteredName = window.prompt('File name for download and Google Drive (without .pdf is fine):', defaultName);
+   if (enteredName === null) return;
+   const fileName = enteredName.trim().replace(/\.pdf$/i,'');
+   if (!fileName) { notify('Please enter a valid PDF filename.'); return; }
+   try{
+    setLoading(true);
+    const res=await fetch(`${API}/api/invoices/pdf`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${localStorage.getItem(AUTH_TOKEN_KEY)||''}`},body:JSON.stringify(payload('COMPLETED',fileName))});
+    if(!res.ok){let m='Could not generate PDF';try{m=(await res.json()).error||m;}catch{}throw new Error(m);}
+    const blob=await res.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`${fileName.replace(/[\\/:*?"<>|]/g,'-')}.pdf`;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
+    await refreshAll();setEditingInvoiceId(null);setEditingInvoiceStatus(null);
+    notify(invoiceType==='PROFORMA'?'Proforma PDF generated and saved.':'PDF generated and invoice stored as completed.');setPage('invoices');
+   }catch(e){notify(e instanceof Error?e.message:'Could not generate PDF');}
+   finally{setLoading(false);}
+  }
+  function updatePayment(inv:Invoice){setDialog({kind:'payment',invoice:inv,amountPaid:String(inv.amountPaid ?? 0),error:''});}
  function updateWorkStatus(inv:Invoice,nextStatus:string){
   if(nextStatus!=='PENDING'&&nextStatus!=='PARTIAL'&&nextStatus!=='COMPLETED')return;
   const currentPaid=Number(inv.amountPaid)||0;
@@ -528,7 +580,7 @@ const nav = (
 </div>
 <div className="content-card tip-card"><div className="tip-symbol">✦</div><div><h3>No demo figures</h3><p>Summary totals update when invoices and payments are saved. A new database starts at zero until real records are entered.</p></div></div></div>
    </section>}
-   {page==='invoices'&&<section className="page-content"><div className="page-heading"><div><div className="eyebrow">DATABASE RECORDS</div><h1>Invoices</h1><p>Create invoices, generate PDFs and update payment records.</p></div><button className="primary-btn" onClick={newInvoice}><Plus size={18}/> Create invoice</button></div><div className="content-card invoice-list-card"><div className="table-tools"><div className="searchbox"><Search size={17}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search invoice number or client..."/></div><button className="filter-btn" onClick={()=>void loadInvoices()}><RefreshCw size={14}/> Refresh</button></div><InvoiceTable invoices={invoices} onPayment={updatePayment} onEdit={editInvoice} onDelete={deleteInvoice} onWorkStatus={updateWorkStatus} empty="No invoices found. Use Create invoice to add the first genuine record."/></div></section>}
+   {page==='invoices'&&<section className="page-content"><div className="page-heading"><div><div className="eyebrow">DATABASE RECORDS</div><h1>{invoiceView==='PROFORMA'?'Proforma Invoices':'Invoices'}</h1><p>Manage, edit, and download your {invoiceView==='PROFORMA'?'proforma invoices':'regular invoices'}.</p></div><button className="primary-btn" onClick={newInvoice}><Plus size={18}/> Create {invoiceView==='PROFORMA'?'proforma invoice':'invoice'}</button></div><div className="invoice-view-tabs"><button className={invoiceView==='INVOICE'?'active':''} onClick={()=>setInvoiceView('INVOICE')}>Invoices <span>{invoices.filter(i=>i.invoiceType!=='PROFORMA').length}</span></button><button className={invoiceView==='PROFORMA'?'active':''} onClick={()=>setInvoiceView('PROFORMA')}>Proforma Invoices <span>{invoices.filter(i=>i.invoiceType==='PROFORMA').length}</span></button></div><div className="content-card invoice-list-card"><div className="table-tools"><div className="searchbox"><Search size={17}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search invoice number or client..."/></div><button className="filter-btn" onClick={()=>void loadInvoices()}><RefreshCw size={14}/> Refresh</button></div><InvoiceTable invoices={invoices.filter(i=>invoiceView==='PROFORMA'?i.invoiceType==='PROFORMA':i.invoiceType!=='PROFORMA')} onPayment={updatePayment} onEdit={editInvoice} onDelete={deleteInvoice} onWorkStatus={updateWorkStatus} empty={invoiceView==='PROFORMA'?'No proforma invoices yet. Use Create proforma invoice to add one.':'No invoices found. Use Create invoice to add the first genuine record.'}/></div></section>}
    {page==='clients'&&<section className="page-content"><div className="page-heading"><div><div className="eyebrow">SAVED CONTACTS</div><h1>Clients</h1><p>Client details are saved to PostgreSQL and can be reused on invoices.</p></div></div><div className="content-card form-card client-admin"><div className="section-title"><span className="step-number">{editingClient?'EDIT':'NEW'}</span><div><h2>{editingClient?'Edit client':'Add a client'}</h2><p>Only enter details supplied or verified by the client.</p></div></div><div className="field-grid"><Field label="Legal entity name"><input value={clientForm.name} onChange={e=>setClientForm({...clientForm,name:e.target.value})} placeholder="Registered company name"/></Field><Field label="GSTIN"><input value={clientForm.gstin||''} onChange={e=>setClientForm({...clientForm,gstin:e.target.value})} placeholder="Optional"/></Field><Field label="Phone"><input value={clientForm.phone||''} onChange={e=>setClientForm({...clientForm,phone:e.target.value})} placeholder="Contact number"/></Field><Field label="Email"><input type="email" value={clientForm.email||''} onChange={e=>setClientForm({...clientForm,email:e.target.value})} placeholder="Billing email"/></Field></div><Field label="Billing address"><textarea rows={2} value={clientForm.address} onChange={e=>setClientForm({...clientForm,address:e.target.value})} placeholder="Registered billing address"/></Field><div className="inline-actions"><button className="primary-btn" disabled={savingClient} onClick={()=>void saveClient()}><Save size={16}/>{savingClient?'Saving...':editingClient?'Update client':'Save client'}</button>{editingClient&&<button className="secondary-btn" onClick={()=>{setEditingClient(null);setClientForm({...blankClient});}}>Cancel</button>}</div></div><div className="content-card invoice-list-card"><div className="card-heading"><div><h2>Client directory</h2><p>{clients.length} saved clients</p></div></div><div className="table-tools"><div className="searchbox"><Search size={17}/><input value={clientSearch} onChange={e=>setClientSearch(e.target.value)} placeholder="Search clients..."/></div></div><div className="table-wrap"><table><thead><tr><th>CLIENT</th><th>GSTIN</th><th>PHONE</th><th>EMAIL</th><th></th></tr></thead><tbody>{clients.map(c=><tr key={c.id}><td><strong>{c.name}</strong><div className="muted-cell">{c.address||'No billing address saved'}</div></td><td>{c.gstin||'—'}</td><td>{c.phone||'—'}</td><td>{c.email||'—'}</td><td><button className="row-action" title="Edit" onClick={()=>{setEditingClient(c.id);setClientForm({name:c.name,address:c.address||'',gstin:c.gstin||'',phone:c.phone||'',email:c.email||''});}}><Eye size={16}/></button><button className="row-action danger-action" title="Delete" onClick={()=>void deleteClient(c)}><Trash2 size={16}/></button></td></tr>)}</tbody></table>{clients.length===0&&<div className="empty-state"><Users size={28}/><h2>No saved clients</h2><p>Save a client here or create an invoice; client details entered on invoices are also stored.</p></div>}</div></div></section>}
    {page === 'company-profile' && (
   <section className="page-content">
@@ -738,16 +790,12 @@ const nav = (
     )}
   </section>
 )}
-   {page==='create'&&<section className="builder-page"><div className="builder-heading"><div><button className="back-link" onClick={()=>nav('invoices')}>← Back to invoices</button><h1>{editingInvoiceId?'Edit invoice':'Create invoice'}</h1><p>Enter verified billing details. Invoice numbers must be unique and follow your company’s numbering policy.</p></div><div className="builder-actions"><button className="secondary-btn" onClick={()=>setShowPreview(v=>!v)}><Eye size={16}/>{showPreview?'Hide preview':'Show preview'}</button><button className="secondary-btn" disabled={loading} onClick={()=>void saveInvoice()}><Save size={16}/> {editingInvoiceId?'Save changes':'Save invoice'}</button><button className="primary-btn" disabled={loading||Boolean(editingInvoiceId)} onClick={()=>void downloadInvoice()}><Download size={17}/>{loading?'Working...':'Save & generate PDF'}</button></div></div>
-    <div className={`builder-grid ${showPreview?'':'no-preview'}`}><div className="editor-column"><div className="form-card"><div className="section-title"><span className="step-number">01</span><div><h2>Invoice details</h2><p>Enter the actual invoice number and dates.</p></div></div><div className="field-grid"><Field label="Invoice number *"><input value={invoiceNo} onChange={e=>setInvoiceNo(e.target.value)} placeholder="e.g. 17/26-27"/></Field><Field label="Invoice date"><input type="date" value={date} onChange={e=>setDate(e.target.value)}/></Field><Field label="Due date"><input type="date" value={dueDate} onChange={e=>setDueDate(e.target.value)}/></Field><Field label="Place of supply"><input value={place} onChange={e=>setPlace(e.target.value)} placeholder="e.g. Rajasthan (08)"/></Field></div></div>
+   {page==='create'&&<section className="builder-page"><div className="builder-heading"><div><button className="back-link" onClick={()=>nav('invoices')}>← Back to invoices</button><h1>{editingInvoiceId?'Edit': 'Create'} {invoiceType==='PROFORMA'?'proforma invoice':'invoice'}</h1><p>Enter verified billing details. Invoice numbers must be unique and follow your company’s numbering policy.</p></div><div className="builder-actions"><button className="secondary-btn" onClick={()=>setShowPreview(v=>!v)}><Eye size={16}/>{showPreview?'Hide preview':'Show preview'}</button><button className="secondary-btn" disabled={loading} onClick={()=>void saveInvoice('DRAFT')}><Save size={16}/> Save as Draft</button><button className="primary-btn" disabled={loading} onClick={()=>void downloadInvoice()}><Download size={17}/>{loading?'Working...':'Generate PDF & save to Drive'}</button></div></div>
+    <div className={`builder-grid ${showPreview?'':'no-preview'}`}><div className="editor-column"><div className="form-card"><div className="section-title"><span className="step-number">01</span><div><h2>Invoice details</h2><p>Enter the actual invoice number and dates.</p></div></div><div className="field-grid"><Field label="Document type"><select value={invoiceType} onChange={e=>setInvoiceType(e.target.value as 'INVOICE'|'PROFORMA')}><option value="INVOICE">Invoice</option><option value="PROFORMA">Proforma Invoice</option></select></Field><Field label="Invoice number *"><input value={invoiceNo} onChange={e=>setInvoiceNo(e.target.value)} placeholder="e.g. 17/26-27"/></Field><Field label="Invoice date"><input type="date" value={date} onChange={e=>setDate(e.target.value)}/></Field><Field label="Due date"><input type="date" value={dueDate} onChange={e=>setDueDate(e.target.value)}/></Field><Field label="Place of supply"><input value={place} onChange={e=>setPlace(e.target.value)} placeholder="e.g. Rajasthan (08)"/></Field></div></div>
      <div className="form-card"><div className="section-title"><span className="step-number">02</span><div><h2>Client information</h2><p>Choose a saved client or enter their verified details.</p></div></div><Field label="Use saved client"><select defaultValue="" onChange={e=>chooseClient(e.target.value)}><option value="">Enter a new client / choose saved client</option>{clients.map(c=><option key={c.id} value={c.id}>{c.name}{c.gstin?` · ${c.gstin}`:''}</option>)}</select></Field><Field label="Client / legal entity name *"><input value={client.name} onChange={e=>setClient({...client,name:e.target.value})} placeholder="Registered legal name"/></Field><Field label="Billing address"><textarea rows={2} value={client.address} onChange={e=>setClient({...client,address:e.target.value})} placeholder="Billing address"/></Field><div className="field-grid"><Field label="GSTIN"><input value={client.gstin||''} onChange={e=>setClient({...client,gstin:e.target.value})} placeholder="Optional"/></Field><Field label="Contact number"><input value={client.phone||''} onChange={e=>setClient({...client,phone:e.target.value})} placeholder="Optional"/></Field></div><Field label="Billing email"><input type="email" value={client.email||''} onChange={e=>setClient({...client,email:e.target.value})} placeholder="Optional"/></Field></div>
      <div className="form-card"><div className="section-title"><span className="step-number">03</span><div><h2>Items & services</h2><p>Enter the actual contracted services, quantities and rates.</p></div></div><div className="items-editor">{items.map((item,idx)=><div className="item-edit" key={item.id}><div className="item-edit-top"><span>ITEM {String(idx+1).padStart(2,'0')}</span><button className="delete-btn" onClick={()=>setItems(old=>old.filter(i=>i.id!==item.id))} title="Remove item"><Trash2 size={15}/></button></div><Field label="Description *"><input value={item.description} onChange={e=>updateItem(item.id,'description',e.target.value)} placeholder="Description of service or product"/></Field><div className="field-grid three"><Field label="SAC / HSN code"><input value={item.sac} onChange={e=>updateItem(item.id,'sac',e.target.value)} placeholder="If applicable"/></Field><Field label="Quantity"><input type="number" min="0.01" step="any" value={item.qty} onChange={e=>updateItem(item.id,'qty',Number(e.target.value))}/></Field><Field label="Rate (₹)"><input type="number" min="0" step="0.01" value={item.rate} onChange={e=>updateItem(item.id,'rate',Number(e.target.value))}/></Field></div><div className="item-bottom"><label>GST rate <select value={item.gst} onChange={e=>updateItem(item.id,'gst',Number(e.target.value))}><option value={0}>0%</option><option value={5}>5%</option><option value={12}>12%</option><option value={18}>18%</option><option value={28}>28%</option></select></label><strong>{money(item.qty*item.rate)}</strong></div></div>)}</div><button className="add-item-btn" onClick={()=>setItems(old=>[...old,blankItem()])}><Plus size={16}/> Add another item</button></div>
      <div className="form-card"><div className="section-title"><span className="step-number">04</span><div><h2>Tax & payment</h2><p>Check the applicable GST treatment before issuing.</p></div></div><div className="field-grid"><Field label="GST calculation mode"><select value={taxMode} onChange={e=>setTaxMode(e.target.value as 'IGST'|'SPLIT')}><option value="IGST">IGST</option><option value="SPLIT">CGST + SGST</option></select></Field><Field label="Discount (₹)"><input type="number" min="0" step="0.01" value={discount} onChange={e=>setDiscount(Number(e.target.value))}/></Field><Field label="Amount received so far (₹)"><input type="number" min="0" max={total} step="0.01" value={amountPaid} onChange={e=>setAmountPaid(Number(e.target.value))}/></Field><Field label="Payment status"><select value={amountPaid<=0?'PENDING':amountPaid>=total?'COMPLETED':'PARTIAL'} onChange={e=>{const status=e.target.value as 'PENDING'|'PARTIAL'|'COMPLETED';setWorkStatus(status);setAmountPaid(status==='PENDING'?0:status==='COMPLETED'?total:Math.max(0,Math.min(total-0.01,Math.round(total/2*100)/100)));}}><option value="PENDING">Unpaid</option><option value="PARTIAL">Partially paid</option><option value="COMPLETED">Paid</option></select></Field></div><div className="note-box">Subtotal: {money(subtotal)} · Tax: {money(tax)} · Total: {money(total)}. Confirm the legal invoice details and GST treatment before issuing.</div></div></div>
-     {showPreview&&<div className="preview-column"><div className="preview-top"><span><Eye size={15}/> LIVE PREVIEW</span><span>A4 · PORTRAIT</span></div><div className="paper"><div className="paper-topline">NavRasa IT Solutions | Jaipur, Rajasthan</div><div className="paper-header"><div className="paper-brand"><img
-  src="/navrasa-logo.png"
-  alt="NavRasa"
-  className="paper-logo"
-/><div><b>NAVRASA</b><span>IT SOLUTIONS</span></div></div><div className="paper-invoice"><h2>TAX INVOICE</h2><span>Invoice No.: {invoiceNo||'Not assigned'}</span><span>Invoice Date: {dateLabel(date)}</span>{dueDate&&<span>Due Date: {dateLabel(dueDate)}</span>}</div></div><div className="paper-rule"/><div className="bill-grid"><div><b>BILLED BY</b><strong>NavRasa IT Solutions</strong><span>Shyam Nagar, Jaipur, Rajasthan, India - 302019</span><span>GSTIN: 08AAZFN3030G1Z2</span><span>PAN: AAZFN3030G</span><span>info@navrasaitsolutions.com</span><span>+91 63770 67867</span></div><div><b>BILLED TO</b><strong>{client.name||'Client legal name'}</strong><span>{client.address||'Billing address'}</span><span>GST Number: {client.gstin||'—'}</span><span>Contact: {client.phone||'—'}</span></div></div><div className="supply-band"><span>Country of Supply: India</span><span>Place of Supply: {place||'—'}</span></div><table className="paper-table"><thead><tr><th>#</th><th>Item / Description</th><th>GST</th><th>Amount</th><th>Tax</th><th>Total</th></tr></thead><tbody>{items.map((it,i)=><tr key={it.id}><td>{i+1}</td><td>{it.description||'Service description'}<small>SAC: {it.sac||'—'}</small></td><td>{it.gst}%</td><td>{money(it.qty*it.rate)}</td><td>{money(it.qty*it.rate*it.gst/100)}</td><td>{money(it.qty*it.rate*(1+it.gst/100))}</td></tr>)}</tbody></table><div className="paper-bottom"><div className="bank"><b>BANK DETAILS</b><span>Account Name: NavRasa IT Solutions</span><span>Account Number: 50200118244157</span><span>IFSC: HDFC0007653</span><span>Account Type: Current</span><span>Bank: HDFC Bank</span><span>UPI ID: navrasa@ybl</span></div><div className="totals"><div><span>Amount</span><b>{money(subtotal)}</b></div>{taxMode==='IGST'?<div><span>IGST</span><b>{money(tax)}</b></div>:<><div><span>CGST</span><b>{money(tax/2)}</b></div><div><span>SGST</span><b>{money(tax/2)}</b></div></>}<div><span>Discount</span><b>{money(discount)}</b></div><div className="grand-total"><b>Total (INR)</b><b>{money(total)}</b></div><div><span>Received</span><b>{money(amountPaid)}</b></div><div><span>Balance</span><b>{money(Math.max(0,total-amountPaid))}</b></div></div></div><div className="amount-words"><span>Amount in Words:</span><b>{amountWords(total)}</b></div><div className="terms"><b>TERMS & CONDITIONS</b><p>1. Payment shall be made within the due date mentioned on this invoice.</p><p>2. GST has been charged as per applicable provisions of the GST Act.</p><p>3. This invoice covers only the services described above.</p><p>4. Additional work beyond the agreed scope shall be billed separately upon prior approval.</p><p>5. Delayed payments may result in suspension of maintenance services until outstanding dues are cleared.</p></div><div className="paper-disclaimer">This is a computer-generated invoice and does not require a physical signature.<br/>For any enquiry, reach out via finance@navrasaitsolutions.com or call +91 63770 67867</div><div className="paper-footer">NavRasa IT Solutions • www.navrasaitsolutions.com</div></div><div className="preview-note"><CheckCircle2 size={15}/> Preview updates automatically. Verify company/bank details before issuing.</div></div>}
+     {showPreview&&<div className="preview-column"><div className="preview-top"><span><Eye size={15}/> LIVE PREVIEW</span><span>A4 · PORTRAIT</span></div><div className="paper"><div className="paper-topline">{companyProfile.name || "NavRasa IT Solutions"} | {companyProfile.address || "Jaipur, Rajasthan"}</div><div className="paper-header"><div className="paper-brand"><img src={companyProfile.logoDataUrl || "/navrasa-logo.png"} alt="NavRasa" className="paper-logo"/><div><b>NAVRASA</b><span>IT SOLUTIONS</span></div></div><div className="paper-invoice"><h2>{invoiceType==='PROFORMA'?'PROFORMA INVOICE':'TAX INVOICE'}</h2><span>Invoice No.: {invoiceNo||'Not assigned'}</span><span>Invoice Date: {dateLabel(date)}</span>{dueDate&&<span>Due Date: {dateLabel(dueDate)}</span>}</div></div><div className="paper-rule"/><div className="bill-grid"><div><b>BILLED BY</b><strong>{companyProfile.legalName || companyProfile.name || "NavRasa IT Solutions"}</strong><span>{companyProfile.address}</span><span>GSTIN: {companyProfile.gstin || "—"}</span><span>PAN: {companyProfile.pan || "—"}</span><span>{companyProfile.email}</span><span>{companyProfile.phone}</span></div><div><b>BILLED TO</b><strong>{client.name||'Client legal name'}</strong><span>{client.address||'Billing address'}</span><span>GST Number: {client.gstin||'—'}</span><span>Contact: {client.phone||'—'}</span></div></div><div className="supply-band"><span>Country of Supply: India</span><span>Place of Supply: {place||'—'}</span></div><table className="paper-table"><thead><tr><th>#</th><th>Item / Description</th><th>GST</th><th>Amount</th><th>Tax</th><th>Total</th></tr></thead><tbody>{items.map((it,i)=><tr key={it.id}><td>{i+1}</td><td>{it.description||'Service description'}<small>SAC: {it.sac||'—'}</small></td><td>{it.gst}%</td><td>{money(it.qty*it.rate)}</td><td>{money(it.qty*it.rate*it.gst/100)}</td><td>{money(it.qty*it.rate*(1+it.gst/100))}</td></tr>)}</tbody></table><div className="paper-bottom"><div className="bank"><b>BANK DETAILS</b><span>Account Name: {companyProfile.bankAccountName}</span><span>Account Number: {companyProfile.bankAccountNumber}</span><span>IFSC: {companyProfile.ifsc}</span><span>Account Type: {companyProfile.accountType}</span><span>Bank: {companyProfile.bankName}</span><span>UPI ID: {companyProfile.upiId}</span></div><div className="totals"><div><span>Amount</span><b>{money(subtotal)}</b></div>{taxMode==='IGST'?<div><span>IGST</span><b>{money(tax)}</b></div>:<><div><span>CGST</span><b>{money(tax/2)}</b></div><div><span>SGST</span><b>{money(tax/2)}</b></div></>}<div><span>Discount</span><b>{money(discount)}</b></div><div className="grand-total"><b>Total (INR)</b><b>{money(total)}</b></div><div><span>Received</span><b>{money(amountPaid)}</b></div><div><span>Balance</span><b>{money(Math.max(0,total-amountPaid))}</b></div></div></div><div className="amount-words"><span>Amount in Words:</span><b>{amountWords(total)}</b></div><div className="terms"><b>TERMS & CONDITIONS</b>{(companyProfile.paymentTerms || "Payment shall be made within the due date mentioned on this invoice.\nGST has been charged as per applicable provisions of the GST Act.").split(/\n?\n/).filter(Boolean).map((term, index) => <p key={index}>{index + 1}. {term}</p>)}</div><div className="paper-disclaimer">This is a computer-generated invoice and does not require a physical signature.<br/>For any enquiry, reach out via {companyProfile.email || "your registered email"} or call {companyProfile.phone || "your registered phone"}</div><div className="paper-footer">{companyProfile.invoiceFooter || companyProfile.name || "NavRasa IT Solutions"}</div></div><div className="preview-note"><CheckCircle2 size={15}/> Preview updates automatically. Verify company/bank details before issuing.</div></div>}
     </div></section>}
   </main>{toast&&<div className="toast"><CheckCircle2 size={17}/>{toast}<button onClick={()=>setToast('')}><X size={15}/></button></div>}
   {dialog&&<div role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget&&!dialogBusy)setDialog(null);}} style={{position:'fixed',inset:0,zIndex:2000,background:'rgba(15,23,42,.58)',backdropFilter:'blur(5px)',display:'flex',alignItems:'center',justifyContent:'center',padding:20}}>
@@ -1022,6 +1070,7 @@ function InvoiceTable({
               <tr key={invoice.id}>
                 <td>
                   <strong>{invoice.invoiceNo}</strong>
+                  {invoice.invoiceType === 'PROFORMA' && <div style={{display:'inline-block',marginLeft:8,padding:'3px 7px',borderRadius:5,background:'#e0e7ff',color:'#3730a3',fontSize:10,fontWeight:800,letterSpacing:0.5}}>PROFORMA</div>}{invoice.invoiceStatus === 'DRAFT' && <div style={{display:'inline-block',marginLeft:8,padding:'3px 7px',borderRadius:5,background:'#fff3cd',color:'#856404',fontSize:10,fontWeight:800,letterSpacing:0.5}}>DRAFT</div>}
                   {invoice.dueDate && (
                     <div className="muted-cell">
                       Due {dateLabel(invoice.dueDate)}
@@ -1037,7 +1086,7 @@ function InvoiceTable({
                   </div>
                 </td>
                 <td>
-                  <select
+                  {invoice.invoiceType === 'PROFORMA' ? <span className="muted-cell">Not tracked</span> : <select
                     aria-label={`Payment status for ${invoice.invoiceNo}`}
                     value={Number(invoice.amountPaid)<=0?'PENDING':Number(invoice.amountPaid)>=Number(invoice.total)?'COMPLETED':'PARTIAL'}
                     onChange={(e) => onWorkStatus(invoice, e.target.value)}
@@ -1045,11 +1094,10 @@ function InvoiceTable({
                     <option value="PENDING">Pending</option>
                     <option value="PARTIAL">Partially paid</option>
                     <option value="COMPLETED">Paid</option>
-                  </select>
+                  </select>}
                 </td>
                 <td>
-                  <span className={`status-pill ${status}`}>{(invoice.paymentStatus || 'UNPAID').replace('PARTIAL','Partially paid').replace('UNPAID','Unpaid').replace('PAID','Paid')}</span>
-                  <div className="muted-cell">Outstanding: {money(Math.max(0, invoice.total - invoice.amountPaid))}</div>
+                  {invoice.invoiceType === 'PROFORMA' ? <span className="muted-cell">Proforma</span> : <><span className={`status-pill ${status}`}>{(invoice.paymentStatus || 'UNPAID').replace('PARTIAL','Partially paid').replace('UNPAID','Unpaid').replace('PAID','Paid')}</span><div className="muted-cell">Outstanding: {money(Math.max(0, invoice.total - invoice.amountPaid))}</div></>}
                 </td>
                 <td>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: 8, whiteSpace: 'nowrap' }}>
@@ -1062,7 +1110,7 @@ function InvoiceTable({
                     >
                       <FileText size={16} />
                     </button>
-                    <button
+                    {invoice.invoiceType !== 'PROFORMA' && <button
                       className="row-action"
                       type="button"
                       title="Update payment"
@@ -1070,7 +1118,7 @@ function InvoiceTable({
                       onClick={() => onPayment(invoice)}
                     >
                       <IndianRupee size={16} />
-                    </button>
+                    </button>}
                     <button
                       className="row-action danger-action"
                       type="button"

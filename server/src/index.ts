@@ -163,7 +163,7 @@ app.post('/api/auth/login', async (req, res) => {
 
     const user = await prisma.user.findUnique({
       where: { email },
-      include: { business: true },
+      include: { business: { select: { id: true, name: true } } },
     });
 
     if (!user || !user.businessId || !user.business || !(await bcrypt.compare(password, user.passwordHash))) {
@@ -265,33 +265,51 @@ const saveClientFromInvoice = async (client: any, businessId: string) => {
 app.get('/api/dashboard', requireAuth, async (req, res) => {
   try {
     const businessId = (req as AuthenticatedRequest).auth!.businessId;
-    const invoices = await prisma.invoice.findMany({
-      where: { businessId },
-      orderBy: { invoiceDate: 'desc' },
-    });
+    const invoiceWhere = {
+      businessId,
+      invoiceStatus: { not: 'DRAFT' },
+      invoiceType: { not: 'PROFORMA' },
+    };
+
+    // Dashboard totals need only a few columns. Avoid loading every invoice's
+    // JSON line items and PDF metadata just to calculate summary cards.
+    const [summaryRows, recentRows] = await Promise.all([
+      prisma.invoice.findMany({
+        where: invoiceWhere,
+        select: { total: true, amountPaid: true, dueDate: true, paymentStatus: true },
+      }),
+      prisma.invoice.findMany({
+        where: invoiceWhere,
+        orderBy: { invoiceDate: 'desc' },
+        take: 10,
+      }),
+    ]);
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const all = invoices.map(toInvoiceJson);
-    const totalInvoiced = all.reduce((sum: number, i: any) => sum + i.total, 0);
-    const totalPaid = all.reduce((sum: number, i: any) => sum + i.amountPaid, 0);
-    const outstanding = all.reduce((sum: number, i: any) => sum + Math.max(0, i.total - i.amountPaid), 0);
-    const overdue = all.filter((i: any) => i.dueDate && new Date(i.dueDate) < today && i.total > i.amountPaid);
+    const all = summaryRows.map((row) => ({
+      total: Number(row.total),
+      amountPaid: Number(row.amountPaid || 0),
+      dueDate: row.dueDate,
+      paymentStatus: row.paymentStatus,
+    }));
+    const totalInvoiced = all.reduce((sum, i) => sum + i.total, 0);
+    const totalPaid = all.reduce((sum, i) => sum + i.amountPaid, 0);
+    const outstanding = all.reduce((sum, i) => sum + Math.max(0, i.total - i.amountPaid), 0);
+    const overdue = all.filter((i) => i.dueDate && new Date(i.dueDate) < today && i.total > i.amountPaid);
 
     return res.json({
       totalInvoiced,
       totalPaid,
       outstanding,
-      overdueAmount: overdue.reduce((sum: number, i: any) => sum + Math.max(0, i.total - i.amountPaid), 0),
+      overdueAmount: overdue.reduce((sum, i) => sum + Math.max(0, i.total - i.amountPaid), 0),
       invoiceCount: all.length,
-      paidCount: all.filter((i: any) => i.paymentStatus === 'PAID').length,
+      paidCount: all.filter((i) => i.paymentStatus === 'PAID').length,
       pendingCount: all.filter(
-        (i: any) =>
-          i.paymentStatus !== 'PAID' &&
-        !(i.dueDate && new Date(i.dueDate) < today)
+        (i) => i.paymentStatus !== 'PAID' && !(i.dueDate && new Date(i.dueDate) < today)
       ).length,
       overdueCount: overdue.length,
-      recentInvoices: all.slice(0, 10),
+      recentInvoices: recentRows.map(toInvoiceJson),
     });
   } catch (error) {
     console.error('Dashboard failed:', error);
@@ -384,6 +402,8 @@ app.post('/api/invoices', requireAuth, async (req, res) => {
         total: sums.total,
         amountPaid,
         paymentStatus,
+        invoiceStatus: d.invoiceStatus === 'DRAFT' ? 'DRAFT' : 'COMPLETED',
+        invoiceType: d.invoiceType === 'PROFORMA' ? 'PROFORMA' : 'INVOICE',
         notes: d.notes || null,
         items: sums.items,
       },
@@ -472,6 +492,8 @@ app.put('/api/invoices/:id', requireAuth, async (req, res) => {
               ? 'PARTIAL'
               : 'UNPAID',
         workStatus,
+        invoiceStatus: d.invoiceStatus === 'DRAFT' ? 'DRAFT' : 'COMPLETED',
+        invoiceType: d.invoiceType === 'PROFORMA' ? 'PROFORMA' : 'INVOICE',
         notes: d.notes || null,
         items: sums.items,
       },
@@ -726,6 +748,7 @@ async function driveClient(businessId: string) {
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 const money = (n: number) => new Intl.NumberFormat('en-IN', { style:'currency', currency:'INR', maximumFractionDigits:2 }).format(n);
 function invoiceHtml(d: any) {
+ const profile = d.companyProfile || {};
  const logoCandidates = [
     path.resolve(process.cwd(), 'client/public/navrasa-logo.png'),
     path.resolve(process.cwd(), '../client/public/navrasa-logo.png'),
@@ -733,9 +756,11 @@ function invoiceHtml(d: any) {
 
  const logoPath = logoCandidates.find((file) => fs.existsSync(file));
 
- const logoHtml = logoPath
-    ? `<img src="data:image/png;base64,${fs.readFileSync(logoPath).toString('base64')}" alt="NavRasa" style="width:48px;height:48px;object-fit:contain;display:block;">`
-    : '<div class="mark">N</div>';
+ const logoHtml = profile.logoDataUrl && /^data:image\/(png|jpeg|jpg|webp);base64,/.test(profile.logoDataUrl)
+     ? `<img src="${esc(profile.logoDataUrl)}" alt="Company logo" style="width:48px;height:48px;object-fit:contain;display:block;">`
+     : logoPath
+       ? `<img src="data:image/png;base64,${fs.readFileSync(logoPath).toString('base64')}" alt="NavRasa" style="width:48px;height:48px;object-fit:contain;display:block;">`
+       : '<div class="mark">N</div>';
  const items = Array.isArray(d.items) ? d.items : [];
  const rows = items.map((i:any,idx:number)=>`<tr><td>${idx+1}</td><td>${esc(i.description)}<small>SAC: ${esc(i.sac)}</small></td><td>${Number(i.gst)||0}%</td><td>${money((Number(i.qty)||0)*(Number(i.rate)||0))}</td><td>${money((Number(i.qty)||0)*(Number(i.rate)||0)*(Number(i.gst)||0)/100)}</td><td>${money((Number(i.qty)||0)*(Number(i.rate)||0)*(1+(Number(i.gst)||0)/100))}</td></tr>`).join('');
  const subtotal = items.reduce((s:number,i:any)=>s+(Number(i.qty)||0)*(Number(i.rate)||0),0);
@@ -744,13 +769,15 @@ function invoiceHtml(d: any) {
  const split = d.taxMode === 'SPLIT';
  return `<!doctype html><html><head><meta charset="utf-8"><style>
  @page{size:A4;margin:12mm}*{box-sizing:border-box}body{font:10px Georgia,serif;color:#202020;margin:0}.topline{font:8px Arial;color:#777;padding-bottom:18px}.head{display:flex;justify-content:space-between;align-items:flex-start}.brand{display:flex;align-items:center;gap:9px}.mark{font:bold 28px Arial;border:2px solid #111;width:35px;height:38px;display:grid;place-items:center}.brand b{font:bold 19px Georgia;letter-spacing:2px;display:block}.brand span{font:9px Arial;letter-spacing:4px}.inv{text-align:right;color:#666;font-size:9px}.inv h1{font:bold 24px Georgia;color:#222;margin:0 0 6px}.rule{height:2px;background:#222;margin:23px 0}.bills{display:grid;grid-template-columns:1fr 1fr;gap:35px;min-height:130px}.bills div{display:flex;flex-direction:column;gap:5px;overflow-wrap:anywhere}.bills b{font:bold 11px Georgia;letter-spacing:1px;margin-bottom:5px}.bills strong{font:bold 12px Georgia}.bills span{font:9px Arial;line-height:1.4}.supply{display:flex;justify-content:space-between;background:#eee;padding:11px;margin:15px 0 18px;font:bold 9px Arial}table{width:100%;border-collapse:collapse}thead{background:#151515;color:#fff}th{font:bold 9px Georgia;padding:10px 6px;text-align:right}th:nth-child(2){text-align:left}td{border:1px solid #ddd;padding:10px 6px;text-align:right;font:9px Arial;vertical-align:top}td:nth-child(2){text-align:left}small{display:block;font-size:8px;color:#666;margin-top:4px}.bottom{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:22px}.bank{display:flex;flex-direction:column;gap:5px}.bank b{font:bold 11px Georgia;letter-spacing:1px}.bank span{font:9px Arial}.totals div{display:flex;justify-content:space-between;padding:4px 0;font:10px Arial}.totals .grand{background:#111;color:#fff;padding:10px;font:bold 12px Georgia;margin-top:6px}.words{margin:22px 0;font-size:11px}.words span{font:9px Arial;color:#777}.terms b{font:bold 11px Georgia;letter-spacing:1px}.terms p{font:9px Georgia;margin:5px 0}.disclaimer{text-align:center;color:#777;font:9px Georgia;line-height:1.7;margin-top:38px}.footer{border-top:1px solid #ddd;margin-top:55px;padding-top:10px;text-align:center;font:8px Arial;color:#777}
- </style></head><body><div class="topline">NavRasa IT Solutions | Jaipur, Rajasthan</div><div class="head"><div class="brand">${logoHtml}<div><b>NAVRASA</b><span>IT SOLUTIONS</span></div></div><div class="inv"><h1>TAX INVOICE</h1><div>Invoice No.: ${esc(d.invoiceNo)}</div><div>Invoice Date: ${esc(d.date)}</div>${d.dueDate?`<div>Due Date: ${esc(d.dueDate)}</div>`:''}</div></div><div class="rule"></div><div class="bills"><div><b>BILLED BY</b><strong>NavRasa IT Solutions</strong><span>Shyam Nagar, Jaipur, Rajasthan, India - 302019</span><span>GSTIN: 08AAZFN3030G1Z2</span><span>PAN: AAZFN3030G</span><span>Email: info@navrasaitsolutions.com</span><span>Phone: +91 63770 67867</span></div><div><b>BILLED TO</b><strong>${esc(d.client?.name)}</strong><span>${esc(d.client?.address)}</span><span>GST Number: ${esc(d.client?.gstin)}</span><span>Contact Details: ${esc(d.client?.phone)}</span></div></div><div class="supply"><span>Country of Supply: India</span><span>Place of Supply: ${esc(d.place)}</span></div><table><thead><tr><th>#</th><th>Item / Description</th><th>GST Rate</th><th>Amount</th><th>${split?'Tax':'IGST'}</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table><div class="bottom"><div class="bank"><b>BANK DETAILS</b><span>Account Name: NavRasa IT Solutions</span><span>Account Number: 50200118244157</span><span>IFSC: HDFC0007653</span><span>Account Type: Current</span><span>Bank: HDFC Bank</span><span>UPI ID: navrasa@ybl</span></div><div class="totals"><div><span>Amount</span><b>${money(subtotal)}</b></div>${split?`<div><span>CGST</span><b>${money(tax/2)}</b></div><div><span>SGST</span><b>${money(tax/2)}</b></div>`:`<div><span>IGST</span><b>${money(tax)}</b></div>`}<div><span>Discount</span><b>${money(discount)}</b></div><div class="grand"><b>Total (INR)</b><b>${money(total)}</b></div></div></div><div class="words"><span>Amount in Words: </span><b>${esc(d.amountWords || '')}</b></div><div class="terms"><b>TERMS &amp; CONDITIONS</b><p>1. Payment shall be made within the due date mentioned on this invoice.</p><p>2. GST has been charged as per applicable provisions of the GST Act.</p><p>3. This invoice covers only the services described above.</p><p>4. Any additional work beyond the agreed scope shall be billed separately upon prior approval.</p><p>5. Delayed payments may result in suspension of maintenance services until outstanding dues are cleared.</p></div><div class="disclaimer">This is a computer-generated invoice and does not require a physical signature.<br>For any enquiry, reach out via finance@navrasaitsolutions.com or call +91 63770 67867</div><div class="footer">NavRasa IT Solutions • www.navrasaitsolutions.com</div></body></html>`;
+ </style></head><body><div class="topline">${esc(profile.name || "NavRasa IT Solutions")} | ${esc(profile.address || "Jaipur, Rajasthan")}</div><div class="head"><div class="brand">${logoHtml}<div><b>NAVRASA</b><span>IT SOLUTIONS</span></div></div><div class="inv"><h1>${d.invoiceType === 'PROFORMA' ? 'PROFORMA INVOICE' : 'TAX INVOICE'}</h1><div>Invoice No.: ${esc(d.invoiceNo)}</div><div>Invoice Date: ${esc(d.date)}</div>${d.dueDate?`<div>Due Date: ${esc(d.dueDate)}</div>`:''}</div></div><div class="rule"></div><div class="bills"><div><b>BILLED BY</b><strong>${esc(profile.legalName || profile.name || "NavRasa IT Solutions")}</strong><span>${esc(profile.address)}</span><span>GSTIN: ${esc(profile.gstin || "—")}</span><span>PAN: ${esc(profile.pan || "—")}</span><span>Email: ${esc(profile.email)}</span><span>Phone: ${esc(profile.phone)}</span></div><div><b>BILLED TO</b><strong>${esc(d.client?.name)}</strong><span>${esc(d.client?.address)}</span><span>GST Number: ${esc(d.client?.gstin)}</span><span>Contact Details: ${esc(d.client?.phone)}</span></div></div><div class="supply"><span>Country of Supply: India</span><span>Place of Supply: ${esc(d.place)}</span></div><table><thead><tr><th>#</th><th>Item / Description</th><th>GST Rate</th><th>Amount</th><th>${split?'Tax':'IGST'}</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table><div class="bottom"><div class="bank"><b>BANK DETAILS</b><span>Account Name: ${esc(profile.bankAccountName)}</span><span>Account Number: ${esc(profile.bankAccountNumber)}</span><span>IFSC: ${esc(profile.ifsc)}</span><span>Account Type: ${esc(profile.accountType)}</span><span>Bank: ${esc(profile.bankName)}</span><span>UPI ID: ${esc(profile.upiId)}</span></div><div class="totals"><div><span>Amount</span><b>${money(subtotal)}</b></div>${split?`<div><span>CGST</span><b>${money(tax/2)}</b></div><div><span>SGST</span><b>${money(tax/2)}</b></div>`:`<div><span>IGST</span><b>${money(tax)}</b></div>`}<div><span>Discount</span><b>${money(discount)}</b></div><div class="grand"><b>Total (INR)</b><b>${money(total)}</b></div></div></div><div class="words"><span>Amount in Words: </span><b>${esc(d.amountWords || '')}</b></div><div class="terms"><b>TERMS &amp; CONDITIONS</b>${(profile.paymentTerms ? String(profile.paymentTerms).split(/\n?\n/) : ["Payment shall be made within the due date mentioned on this invoice.", "GST has been charged as per applicable provisions of the GST Act."]).filter(Boolean).map((term: string, index: number) => `<p>${index + 1}. ${esc(term)}</p>`).join("")}</div><div class="disclaimer">This is a computer-generated invoice and does not require a physical signature.<br>For any enquiry, reach out via ${esc(profile.email || "your registered email")} or call ${esc(profile.phone || "your registered phone")}</div><div class="footer">${esc(profile.invoiceFooter || profile.name || "NavRasa IT Solutions")}</div></body></html>`;
 }
 app.post('/api/invoices/pdf', requireAuth, async (req, res) => {
   let browser: any;
   try {
     const businessId = (req as AuthenticatedRequest).auth!.businessId;
     const d = req.body || {};
+    const companyProfile = await prisma.business.findUnique({ where: { id: businessId }, select: companyProfileSelect });
+    if (!companyProfile) return res.status(404).json({ error: 'Company profile not found.' });
     if (
       typeof d.invoiceNo !== 'string' || !d.invoiceNo.trim() ||
       typeof d.client?.name !== 'string' || !d.client.name.trim() ||
@@ -766,7 +793,7 @@ app.post('/api/invoices/pdf', requireAuth, async (req, res) => {
     const paymentStatus = amountPaid >= total && total > 0 ? 'PAID' : amountPaid > 0 ? 'PARTIAL' : 'UNPAID';
 
     await saveClientFromInvoice(d.client, businessId);
-    const html = invoiceHtml({ ...d, subtotal, tax, total });
+    const html = invoiceHtml({ ...d, companyProfile, subtotal, tax, total });
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage({ viewport: { width: 1200, height: 1600 } });
     await page.setContent(html, { waitUntil: 'networkidle' });
@@ -775,9 +802,11 @@ app.post('/api/invoices/pdf', requireAuth, async (req, res) => {
     browser = undefined;
 
     const safeBusinessId = businessId.replace(/[^a-zA-Z0-9_-]/g, '-');
-    const safeInvoiceNo = invoiceNo.replace(/[^a-zA-Z0-9_-]/g, '-');
-    const filename = `${safeBusinessId}-${safeInvoiceNo}.pdf`;
-    const filePath = path.join(generatedDir, filename);
+    const requestedName = typeof d.fileName === 'string' && d.fileName.trim() ? d.fileName.trim() : (/^invoice/i.test(invoiceNo) ? invoiceNo : `Invoice${invoiceNo}_${d.client.name.trim()}`);
+    const safeInvoiceNo = requestedName.replace(/\.pdf$/i, '').replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 140) || `Invoice${Date.now()}`;
+    const filename = `${safeInvoiceNo}.pdf`;
+    const storageFilename = `${safeBusinessId}-${safeInvoiceNo}.pdf`;
+    const filePath = path.join(generatedDir, storageFilename);
     fs.writeFileSync(filePath, pdf);
 
     const invoiceFields = {
@@ -790,6 +819,8 @@ app.post('/api/invoices/pdf', requireAuth, async (req, res) => {
       clientEmail: d.client.email || null,
       amountPaid,
       paymentStatus,
+      invoiceStatus: 'COMPLETED',
+      invoiceType: d.invoiceType === 'PROFORMA' ? 'PROFORMA' : 'INVOICE',
       notes: d.notes || null,
       placeOfSupply: d.place || '',
       taxMode: d.taxMode || 'IGST',
@@ -807,42 +838,61 @@ app.post('/api/invoices/pdf', requireAuth, async (req, res) => {
       create: { businessId, invoiceNo, ...invoiceFields },
     });
 
-    // Google Drive currently uses one local development OAuth token. Keep it disabled
-    // for multi-tenant use until credentials are stored separately per business.
-    
-    // Upload the invoice to this business's connected Google Drive.
+    // Save into Invoices / Indian financial year / invoice month in the connected business Drive.
+    // Folder lookup is scoped to each parent to avoid creating duplicate folders.
     try {
       const drive = await driveClient(businessId);
-
       if (drive) {
-        const uploaded = await drive.files.create({
-          requestBody: {
-            name: filename,
-            mimeType: 'application/pdf',
-            parents: process.env.GOOGLE_DRIVE_FOLDER_ID
-              ? [process.env.GOOGLE_DRIVE_FOLDER_ID]
-              : undefined,
-          },
-          media: {
-            mimeType: 'application/pdf',
-            body: fs.createReadStream(filePath),
-          },
-          fields: 'id,name,webViewLink',
-        });
-
-        await prisma.invoice.update({
-          where: { id: record.id },
-          data: {
-            driveFileId: uploaded.data.id || null,
-            driveWebViewLink: uploaded.data.webViewLink || null,
-          },
-        });
+        const findOrCreateFolder = async (name: string, parentId?: string): Promise<string> => {
+          const escapedName = name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+          const parentClause = parentId ? `'${parentId}' in parents` : (process.env.GOOGLE_DRIVE_FOLDER_ID ? `'${process.env.GOOGLE_DRIVE_FOLDER_ID}' in parents` : `'root' in parents`);
+          const found = await drive.files.list({
+            q: `name = '${escapedName}' and mimeType = 'application/vnd.google-apps.folder' and ${parentClause} and trashed = false`,
+            fields: 'files(id,name)',
+            pageSize: 100,
+            spaces: 'drive',
+          });
+          const existingFolder = found.data.files?.[0]?.id;
+          if (existingFolder) return existingFolder;
+          const created = await drive.files.create({
+            requestBody: { name, mimeType: 'application/vnd.google-apps.folder', ...(parentId ? { parents: [parentId] } : (process.env.GOOGLE_DRIVE_FOLDER_ID ? { parents: [process.env.GOOGLE_DRIVE_FOLDER_ID] } : {})) },
+            fields: 'id,name',
+          });
+          if (!created.data.id) throw new Error(`Google Drive did not return an ID for folder ${name}`);
+          return created.data.id;
+        };
+        const invoiceDate = new Date(d.date || Date.now());
+        const year = invoiceDate.getFullYear();
+        const month = invoiceDate.getMonth();
+        const financialYearStart = month >= 3 ? year : year - 1;
+        const financialYear = `FY ${financialYearStart}-${String((financialYearStart + 1) % 100).padStart(2, '0')}`;
+        const monthName = invoiceDate.toLocaleString('en-IN', { month: 'long' });
+        const invoicesFolder = await findOrCreateFolder('Invoices');
+        const yearFolder = await findOrCreateFolder(financialYear, invoicesFolder);
+        const monthFolder = await findOrCreateFolder(monthName, yearFolder);
+        let uploaded;
+        if (record.driveFileId) {
+          const existingDriveFile = await drive.files.get({ fileId: record.driveFileId, fields: 'parents' });
+          const previousParents = (existingDriveFile.data.parents || []).filter((parent: string) => parent !== monthFolder).join(',');
+          uploaded = await drive.files.update({
+            fileId: record.driveFileId,
+            requestBody: { name: filename, mimeType: 'application/pdf' },
+            addParents: monthFolder,
+            ...(previousParents ? { removeParents: previousParents } : {}),
+            media: { mimeType: 'application/pdf', body: fs.createReadStream(filePath) },
+            fields: 'id,name,webViewLink,parents',
+          });
+        } else {
+          uploaded = await drive.files.create({
+            requestBody: { name: filename, mimeType: 'application/pdf', parents: [monthFolder] },
+            media: { mimeType: 'application/pdf', body: fs.createReadStream(filePath) },
+            fields: 'id,name,webViewLink,parents',
+          });
+        }
+        await prisma.invoice.update({ where: { id: record.id }, data: { driveFileId: uploaded.data.id || record.driveFileId || null, driveWebViewLink: uploaded.data.webViewLink || null } });
       }
     } catch (error) {
-      console.error(
-        'Google Drive upload failed; invoice remains saved locally:',
-        error
-      );
+      console.error('Google Drive upload failed; invoice remains saved locally:', error instanceof Error ? error.message : error);
     }
 
 
